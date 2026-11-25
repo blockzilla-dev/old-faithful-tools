@@ -20,3 +20,9 @@ incremental = false
 [profile.test]
 debug = 0
 incremental = false
+
+# Retain the original CLI test profile after the package rename.
+[profile.test.package.old-faithful-tools]
+opt-level = 1
+[profile.dev.package.old-faithful-tools]
+opt-level = 1

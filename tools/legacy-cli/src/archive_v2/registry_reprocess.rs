@@ -1784,6 +1784,8 @@ impl From<LegacyHotBlockWithShredding> for ArchiveV2HotBlockBlob {
             tx_rows: value.tx_rows,
             message_bytes: value.message_bytes,
             metadata_bytes: value.metadata_bytes,
+            consensus_block_id: None,
+            block_markers: Vec::new(),
         }
     }
 }
@@ -1808,6 +1810,8 @@ impl From<LegacyHotBlockWithRewardsVec> for ArchiveV2HotBlockBlob {
             tx_rows: value.tx_rows,
             message_bytes: value.message_bytes,
             metadata_bytes: value.metadata_bytes,
+            consensus_block_id: None,
+            block_markers: Vec::new(),
         }
     }
 }
@@ -6222,15 +6226,92 @@ type BorrowedCurrentRewriteHotBlock<'a> = (
     &'a [[u8; ARCHIVE_V2_HOT_TX_ROW_LEN]],
     &'a [u8],
     &'a [u8],
+    Option<[u8; 32]>,
+    Vec<Vec<u8>>,
 );
+
+#[derive(Debug)]
+enum CurrentHotBlockDecodeError {
+    Prefix(wincode::ReadError),
+    PrefixIndexMismatch(anyhow::Error),
+    Tail(wincode::ReadError),
+}
+
+impl std::fmt::Display for CurrentHotBlockDecodeError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Prefix(error) | Self::Tail(error) => std::fmt::Display::fmt(error, formatter),
+            Self::PrefixIndexMismatch(error) => std::fmt::Display::fmt(error, formatter),
+        }
+    }
+}
+
+// A current prefix that matches the external block index owns any remaining bytes.
+// A malformed consensus tail must never fall through to an older schema. Historical
+// layouts can share a syntactic current prefix, so validate the index before the tail.
+// Pass 1 supplies discard schemas so it validates markers without retaining them.
+fn read_current_hot_block<'a, Prefix, Markers, const LIMIT: usize>(
+    decoded: &'a [u8],
+    validate_prefix: impl FnOnce(&Prefix::Dst) -> Result<()>,
+) -> std::result::Result<(Prefix::Dst, Option<[u8; 32]>, Markers::Dst), CurrentHotBlockDecodeError>
+where
+    Prefix: SchemaRead<'a, blockzilla_primitives::BoundedWincodeLeb128Config<LIMIT>>,
+    Markers: SchemaRead<'a, blockzilla_primitives::BoundedWincodeLeb128Config<LIMIT>>,
+    Markers::Dst: Default,
+{
+    let mut remaining = decoded;
+    let prefix = Prefix::get(&mut remaining).map_err(CurrentHotBlockDecodeError::Prefix)?;
+    validate_prefix(&prefix).map_err(CurrentHotBlockDecodeError::PrefixIndexMismatch)?;
+    let (consensus_block_id, markers) = if remaining.is_empty() {
+        (None, Markers::Dst::default())
+    } else {
+        <(Option<[u8; 32]>, Markers) as SchemaRead<
+            blockzilla_primitives::BoundedWincodeLeb128Config<LIMIT>,
+        >>::get(&mut remaining)
+        .map_err(CurrentHotBlockDecodeError::Tail)?
+    };
+    if !remaining.is_empty() {
+        return Err(CurrentHotBlockDecodeError::Tail(
+            wincode::error::trailing_bytes(),
+        ));
+    }
+    Ok((prefix, consensus_block_id, markers))
+}
 
 fn decode_current_rewrite_hot_block_borrowed(
     decoded: &[u8],
-) -> wincode::ReadResult<BorrowedCurrentRewriteHotBlock<'_>> {
-    wincode::config::deserialize_exact(
-        decoded,
-        bounded_wincode_config::<MAX_HOT_BLOCK_FRAME_BYTES_USIZE>(),
-    )
+    index_row: blockzilla_archive_v2::ArchiveV2HotBlockIndexRow,
+) -> std::result::Result<BorrowedCurrentRewriteHotBlock<'_>, CurrentHotBlockDecodeError> {
+    type Prefix<'a> = (
+        ArchiveV2HotBlockHeader,
+        u32,
+        &'a [[u8; ARCHIVE_V2_HOT_TX_ROW_LEN]],
+        &'a [u8],
+        &'a [u8],
+    );
+    let ((header, tx_count, rows, messages, metadata), consensus_block_id, markers) =
+        read_current_hot_block::<Prefix<'_>, Vec<Vec<u8>>, MAX_HOT_BLOCK_FRAME_BYTES_USIZE>(
+            decoded,
+            |(header, tx_count, rows, _, _)| {
+                validate_hot_block_index_fields(
+                    header.slot,
+                    *tx_count,
+                    rows.len(),
+                    rows.iter()
+                        .map(|row| decode_hot_tx_row(row).signature_count),
+                    index_row,
+                )
+            },
+        )?;
+    Ok((
+        header,
+        tx_count,
+        rows,
+        messages,
+        metadata,
+        consensus_block_id,
+        markers,
+    ))
 }
 
 fn validate_hot_block_header_and_rows(
@@ -6239,8 +6320,24 @@ fn validate_hot_block_header_and_rows(
     rows: &[ArchiveV2HotTxRow],
     index_row: blockzilla_archive_v2::ArchiveV2HotBlockIndexRow,
 ) -> Result<()> {
+    validate_hot_block_index_fields(
+        header.slot,
+        tx_count,
+        rows.len(),
+        rows.iter().map(|row| row.signature_count),
+        index_row,
+    )
+}
+
+fn validate_hot_block_index_fields(
+    slot: u64,
+    tx_count: u32,
+    row_count: usize,
+    mut signature_counts: impl Iterator<Item = u8>,
+    index_row: blockzilla_archive_v2::ArchiveV2HotBlockIndexRow,
+) -> Result<()> {
     ensure!(
-        header.slot == index_row.slot,
+        slot == index_row.slot,
         "block/index slot mismatch at block_id {}",
         index_row.block_id
     );
@@ -6250,12 +6347,12 @@ fn validate_hot_block_header_and_rows(
         index_row.block_id
     );
     ensure!(
-        rows.len() == index_row.tx_count as usize,
+        row_count == index_row.tx_count as usize,
         "block tx row count mismatch at block_id {}",
         index_row.block_id
     );
-    let signatures = rows.iter().try_fold(0u32, |sum, row| {
-        sum.checked_add(u32::from(row.signature_count))
+    let signatures = signature_counts.try_fold(0u32, |sum, count| {
+        sum.checked_add(u32::from(count))
             .context("block signature count overflow")
     })?;
     ensure!(
@@ -6304,31 +6401,46 @@ fn decode_hot_block_bytes_with_schema(
     decoded: &[u8],
     row: blockzilla_archive_v2::ArchiveV2HotBlockIndexRow,
 ) -> Result<DecodedHotBlock> {
-    let (block, outer_schema) = match wincode::config::deserialize_exact::<ArchiveV2HotBlockBlob, _>(
-        decoded,
-        bounded_wincode_config::<MAX_HOT_BLOCK_FRAME_BYTES_USIZE>(),
-    ) {
-        Ok(block) => (block, HotBlockOuterSchema::Current),
-        Err(current_error) => {
-            match wincode::config::deserialize_exact::<LegacyHotBlockWithShredding, _>(
-                decoded,
-                bounded_wincode_config::<MAX_HOT_BLOCK_FRAME_BYTES_USIZE>(),
-            ) {
-                Ok(block) => (block.into(), HotBlockOuterSchema::LegacyShredding),
-                Err(shredding_error) => {
-                    let legacy: LegacyHotBlockWithRewardsVec = wincode::config::deserialize_exact(
-                    decoded,
-                    bounded_wincode_config::<MAX_HOT_BLOCK_FRAME_BYTES_USIZE>(),
-                )
-                .with_context(|| {
-                    format!(
-                        "decode hot block_id {}: current={current_error}; legacy-shredding={shredding_error}",
-                        row.block_id
-                    )
-                })?;
-                    (legacy.into(), HotBlockOuterSchema::LegacyRewardsVec)
-                }
-            }
+    type CurrentPrefix = (
+        ArchiveV2HotBlockHeader,
+        u32,
+        Vec<ArchiveV2HotTxRow>,
+        Vec<u8>,
+        Vec<u8>,
+    );
+    let current = read_current_hot_block::<
+        CurrentPrefix,
+        Vec<Vec<u8>>,
+        MAX_HOT_BLOCK_FRAME_BYTES_USIZE,
+    >(decoded, |(header, tx_count, rows, _, _)| {
+        validate_hot_block_header_and_rows(header, *tx_count, rows, row)
+    });
+    let (block, outer_schema) = match current {
+        Ok((
+            (header, tx_count, tx_rows, message_bytes, metadata_bytes),
+            consensus_block_id,
+            block_markers,
+        )) => (
+            ArchiveV2HotBlockBlob {
+                header,
+                tx_count,
+                tx_rows,
+                message_bytes,
+                metadata_bytes,
+                consensus_block_id,
+                block_markers,
+            },
+            HotBlockOuterSchema::Current,
+        ),
+        Err(
+            current_error @ (CurrentHotBlockDecodeError::Prefix(_)
+            | CurrentHotBlockDecodeError::PrefixIndexMismatch(_)),
+        ) => {
+            let decoded = decode_legacy_hot_block_bytes(decoded, row, &current_error.to_string())?;
+            (decoded.block, decoded.outer_schema)
+        }
+        Err(CurrentHotBlockDecodeError::Tail(error)) => {
+            return Err(error).context("decode current hot-block consensus tail");
         }
     };
     ensure!(
@@ -6382,13 +6494,25 @@ fn analyze_source_exclusions(input: CompressedBlockInput) -> Result<SourceExclus
         &'a [u8],
         &'a [u8],
     );
-    let current = wincode::config::deserialize_exact::<BorrowedCurrentHotBlock<'_>, _>(
-        &decoded,
-        bounded_wincode_config::<MAX_HOT_BLOCK_FRAME_BYTES_USIZE>(),
-    );
+    type DiscardMarkers =
+        DiscardSeq<DiscardBytes<wincode::len::BincodeLen>, wincode::len::BincodeLen>;
+    let current = read_current_hot_block::<
+        BorrowedCurrentHotBlock<'_>,
+        DiscardMarkers,
+        MAX_HOT_BLOCK_FRAME_BYTES_USIZE,
+    >(&decoded, |(header, tx_count, rows, _, _)| {
+        validate_hot_block_index_fields(
+            header.slot,
+            *tx_count,
+            rows.len(),
+            rows.iter()
+                .map(|row| decode_hot_tx_row(row).signature_count),
+            row,
+        )
+    });
 
     let current_error = match current {
-        Ok((header, tx_count, tx_rows, message_bytes, metadata_bytes)) => {
+        Ok(((header, tx_count, tx_rows, message_bytes, metadata_bytes), _, _)) => {
             let mut header = header.into();
             let rows = tx_rows.iter().map(decode_hot_tx_row);
             return analyze_source_exclusion_regions(
@@ -6401,7 +6525,13 @@ fn analyze_source_exclusions(input: CompressedBlockInput) -> Result<SourceExclus
                 metadata_bytes,
             );
         }
-        Err(error) => error.to_string(),
+        Err(
+            error @ (CurrentHotBlockDecodeError::Prefix(_)
+            | CurrentHotBlockDecodeError::PrefixIndexMismatch(_)),
+        ) => error.to_string(),
+        Err(CurrentHotBlockDecodeError::Tail(error)) => {
+            return Err(error).context("decode pass-1 current hot-block consensus tail");
+        }
     };
 
     // Historical outer schemas are uncommon. They borrow the same large row/message/metadata
@@ -6781,9 +6911,17 @@ fn rewrite_source_block_with_scratch(
     let mut excluded_ids = Vec::new();
     let mut references = 0u64;
     let outer_decode_started = phase_timing_enabled.then(Instant::now);
-    let current = decode_current_rewrite_hot_block_borrowed(&scratch.decoded);
+    let current = decode_current_rewrite_hot_block_borrowed(&scratch.decoded, row);
     let (mut block, outer_schema, access_references) = match current {
-        Ok((mut header, tx_count, row_bytes, message_bytes, metadata_bytes)) => {
+        Ok((
+            mut header,
+            tx_count,
+            row_bytes,
+            message_bytes,
+            metadata_bytes,
+            consensus_block_id,
+            block_markers,
+        )) => {
             scratch.rows.clear();
             if scratch.rows.capacity() < row_bytes.len() {
                 scratch
@@ -6841,10 +6979,16 @@ fn rewrite_source_block_with_scratch(
                 tx_rows: std::mem::take(&mut scratch.rows),
                 message_bytes: std::mem::take(&mut scratch.target_messages),
                 metadata_bytes: std::mem::take(&mut scratch.target_metadata),
+
+                consensus_block_id,
+                block_markers,
             };
             (block, HotBlockOuterSchema::Current, access_references)
         }
-        Err(current_error) => {
+        Err(
+            current_error @ (CurrentHotBlockDecodeError::Prefix(_)
+            | CurrentHotBlockDecodeError::PrefixIndexMismatch(_)),
+        ) => {
             let current_error = current_error.to_string();
             let decoded_block =
                 decode_legacy_hot_block_bytes(&scratch.decoded, row, &current_error)?;
@@ -6892,6 +7036,9 @@ fn rewrite_source_block_with_scratch(
                 phase_timing.message_metadata_rewrite = started.elapsed();
             }
             (block, outer_schema, access_references)
+        }
+        Err(CurrentHotBlockDecodeError::Tail(error)) => {
+            return Err(error).context("decode rewrite current hot-block consensus tail");
         }
     };
 
@@ -12643,6 +12790,9 @@ mod tests {
             }],
             message_bytes,
             metadata_bytes: Vec::new(),
+
+            consensus_block_id: None,
+            block_markers: Vec::new(),
         };
         let encoded = wincode::config::serialize(&block, wincode_leb128_config()).unwrap();
         let compressed = zstd::bulk::compress(&encoded, 1).unwrap();
@@ -13466,6 +13616,9 @@ mod tests {
             }],
             message_bytes: Vec::new(),
             metadata_bytes,
+
+            consensus_block_id: None,
+            block_markers: Vec::new(),
         };
         let encoded = wincode::config::serialize(&block, wincode_leb128_config()).unwrap();
         let analysis = analyze_source_exclusions(compressed_test_input(encoded, 1, 0)).unwrap();
@@ -13489,6 +13642,9 @@ mod tests {
             tx_rows: Vec::new(),
             message_bytes: Vec::new(),
             metadata_bytes: Vec::new(),
+
+            consensus_block_id: None,
+            block_markers: Vec::new(),
         };
         let mut encoded = wincode::config::serialize(&block, wincode_leb128_config()).unwrap();
         encoded.push(0xa5);
@@ -13674,6 +13830,8 @@ mod tests {
             ],
             message_bytes: [first_message, second_message, raw_message].concat(),
             metadata_bytes: [successful, failed, raw_metadata].concat(),
+            consensus_block_id: None,
+            block_markers: Vec::new(),
         }
     }
 
@@ -13691,12 +13849,269 @@ mod tests {
         )
     }
 
+    fn current_outer_prefix_bytes(block: &ArchiveV2HotBlockBlob) -> Vec<u8> {
+        wincode::config::serialize(
+            &(
+                &block.header,
+                block.tx_count,
+                &block.tx_rows,
+                &block.message_bytes,
+                &block.metadata_bytes,
+            ),
+            wincode_leb128_config(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn current_outer_optional_consensus_tail_is_exact_and_count_neutral() {
+        let mut block = registry_wire_parity_block();
+        let prefix = current_outer_prefix_bytes(&block);
+        let empty_tail = wincode::config::serialize(&block, wincode_leb128_config()).unwrap();
+        block.consensus_block_id = Some([0x71; 32]);
+        block.block_markers = vec![vec![1, 2, 3], vec![4, 5]];
+        let full_tail = wincode::config::serialize(&block, wincode_leb128_config()).unwrap();
+        let mut expected_excluded = None;
+        for (encoded, expected_id, expected_markers) in [
+            (prefix, None, Vec::new()),
+            (empty_tail, None, Vec::new()),
+            (full_tail, block.consensus_block_id, block.block_markers),
+        ] {
+            let input = compressed_test_input(encoded.clone(), 3, 0);
+            let (_, _, _, _, _, id, markers) =
+                decode_current_rewrite_hot_block_borrowed(&encoded, input.row).unwrap();
+            assert_eq!(id, expected_id);
+            assert_eq!(markers, expected_markers);
+            let owned = decode_hot_block(&input).unwrap();
+            assert_eq!(owned.consensus_block_id, expected_id);
+            assert_eq!(owned.block_markers, expected_markers);
+            let analysis = analyze_source_exclusions(input).unwrap();
+            assert_eq!(analysis.transactions, 3);
+            if let Some(expected) = &expected_excluded {
+                assert_eq!(&analysis.excluded, expected);
+            } else {
+                expected_excluded = Some(analysis.excluded);
+            }
+        }
+    }
+
+    #[test]
+    fn current_outer_invalid_consensus_tail_is_terminal_in_both_passes() {
+        let block = registry_wire_parity_block();
+        let prefix = current_outer_prefix_bytes(&block);
+        let root = TestDir::new();
+        let source_registry = open_test_registry(
+            &root,
+            "bad-tail-source.bin",
+            &[[1; 32], [2; 32], [3; 32], [4; 32], [5; 32]],
+        );
+        let target_registry =
+            open_test_registry(&root, "bad-tail-target.bin", &[[2; 32], [3; 32], [1; 32]]);
+        for tail in [
+            vec![2],             // invalid Option tag
+            vec![1, 0],          // incomplete block id
+            vec![0],             // missing marker count
+            vec![0, 1, 2, 0xff], // truncated marker bytes
+            vec![0, 0x80, 0],    // nonminimal marker count
+            vec![0, 0, 0xff],    // bytes after a complete empty tail
+        ] {
+            let mut encoded = prefix.clone();
+            encoded.extend_from_slice(&tail);
+            let input = compressed_test_input(encoded.clone(), 3, 0);
+            assert!(matches!(
+                decode_current_rewrite_hot_block_borrowed(&encoded, input.row),
+                Err(CurrentHotBlockDecodeError::Tail(_))
+            ));
+            let error = decode_hot_block_bytes_with_schema(&encoded, input.row)
+                .err()
+                .unwrap();
+            assert!(
+                error
+                    .to_string()
+                    .contains("current hot-block consensus tail")
+            );
+            let error = analyze_source_exclusions(input).unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("pass-1 current hot-block consensus tail")
+            );
+            let error = rewrite_source_block(
+                compressed_test_input(encoded, 3, 0),
+                &source_registry,
+                &[3, 1, 2, 0, 0],
+                &target_registry,
+                1,
+                TEST_WIRE_PROFILE,
+                None,
+                false,
+            )
+            .unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("rewrite current hot-block consensus tail")
+            );
+        }
+    }
+
+    #[test]
+    fn current_outer_index_mismatch_requires_exact_index_valid_legacy_fallback() {
+        let root = TestDir::new();
+        let source_registry = open_test_registry(
+            &root,
+            "index-mismatch-source.bin",
+            &[[1; 32], [2; 32], [3; 32], [4; 32], [5; 32]],
+        );
+        let target_registry = open_test_registry(
+            &root,
+            "index-mismatch-target.bin",
+            &[[2; 32], [3; 32], [1; 32]],
+        );
+        for mismatch in ["slot", "tx_count", "row count", "signature_count"] {
+            let mut block = registry_wire_parity_block();
+            match mismatch {
+                "row count" => {
+                    block.tx_rows.pop();
+                }
+                "signature_count" => block.tx_rows[0].signature_count = 1,
+                _ => {}
+            }
+            let encoded = wincode::config::serialize(&block, wincode_leb128_config()).unwrap();
+            let mut row = compressed_test_input(encoded.clone(), 3, 0).row;
+            match mismatch {
+                "slot" => row.slot += 1,
+                "tx_count" => row.tx_count -= 1,
+                _ => {}
+            }
+            let current_error =
+                decode_current_rewrite_hot_block_borrowed(&encoded, row).unwrap_err();
+            assert!(matches!(
+                &current_error,
+                CurrentHotBlockDecodeError::PrefixIndexMismatch(_)
+            ));
+            assert!(current_error.to_string().contains(mismatch));
+            assert!(decode_hot_block_bytes_with_schema(&encoded, row).is_err());
+            let make_input = || {
+                let mut input = compressed_test_input(encoded.clone(), 3, 0);
+                input.row = row;
+                input
+            };
+            assert!(analyze_source_exclusions(make_input()).is_err());
+            assert!(
+                rewrite_source_block(
+                    make_input(),
+                    &source_registry,
+                    &[3, 1, 2, 0, 0],
+                    &target_registry,
+                    1,
+                    TEST_WIRE_PROFILE,
+                    None,
+                    false,
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn current_outer_consensus_tail_limits_apply_to_retained_and_discarded_markers() {
+        type Prefix<'a> = (
+            Pass1CurrentHotBlockHeader,
+            u32,
+            &'a [[u8; ARCHIVE_V2_HOT_TX_ROW_LEN]],
+            &'a [u8],
+            &'a [u8],
+        );
+        type DiscardMarkers =
+            DiscardSeq<DiscardBytes<wincode::len::BincodeLen>, wincode::len::BincodeLen>;
+        const LIMIT: usize = 1024;
+        let prefix = current_outer_prefix_bytes(&registry_wire_parity_block());
+        for (marker_count, marker_bytes) in [
+            (LIMIT / std::mem::size_of::<Vec<u8>>() + 1, None),
+            (1, Some(LIMIT + 1)),
+        ] {
+            let mut encoded = prefix.clone();
+            encoded.push(0); // no consensus block id
+            encoded.extend(
+                wincode::config::serialize(&(marker_count as u64), wincode_leb128_config())
+                    .unwrap(),
+            );
+            if let Some(bytes) = marker_bytes {
+                encoded.extend(
+                    wincode::config::serialize(&(bytes as u64), wincode_leb128_config()).unwrap(),
+                );
+            }
+            for error in [
+                read_current_hot_block::<Prefix<'_>, Vec<Vec<u8>>, LIMIT>(&encoded, |_| Ok(()))
+                    .unwrap_err(),
+                read_current_hot_block::<Prefix<'_>, DiscardMarkers, LIMIT>(&encoded, |_| Ok(()))
+                    .unwrap_err(),
+            ] {
+                assert!(matches!(
+                    error,
+                    CurrentHotBlockDecodeError::Tail(
+                        wincode::ReadError::PreallocationSizeLimit { .. }
+                    )
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn ambiguous_empty_legacy_layout_is_not_a_current_tail_fallback() {
+        let mut block = registry_wire_parity_block();
+        block.header.rewards = None;
+        block.tx_count = 0;
+        block.tx_rows.clear();
+        block.message_bytes.clear();
+        block.metadata_bytes.clear();
+        let legacy = LegacyHotBlockWithShredding {
+            header: LegacyHotBlockHeaderWithShredding {
+                slot: block.header.slot,
+                parent_slot: block.header.parent_slot,
+                blockhash_id: block.header.blockhash_id,
+                previous_blockhash_id: block.header.previous_blockhash_id,
+                block_time: block.header.block_time,
+                block_height: block.header.block_height,
+                shredding: Vec::new(),
+                rewards: None,
+            },
+            tx_count: 0,
+            tx_rows: Vec::new(),
+            message_bytes: Vec::new(),
+            metadata_bytes: Vec::new(),
+        };
+        let encoded = wincode::config::serialize(&legacy, wincode_leb128_config()).unwrap();
+        let mut truncated_current = current_outer_prefix_bytes(&block);
+        truncated_current.push(0);
+        // There is no outer-schema tag to distinguish these bytes from a current
+        // tail missing its marker count, and both prefixes match the external index.
+        // Follow the shared codec's fail-closed rule.
+        assert_eq!(encoded, truncated_current);
+        let input = compressed_test_input(encoded.clone(), 0, 0);
+        assert!(matches!(
+            decode_current_rewrite_hot_block_borrowed(&encoded, input.row),
+            Err(CurrentHotBlockDecodeError::Tail(_))
+        ));
+        assert!(decode_hot_block_bytes_with_schema(&encoded, input.row).is_err());
+        assert!(analyze_source_exclusions(input).is_err());
+    }
+
     #[test]
     fn borrowed_current_outer_is_exact_and_rejects_malformed_input() {
         let block = registry_wire_parity_block();
         let mut encoded = wincode::config::serialize(&block, wincode_leb128_config()).unwrap();
-        let (header, tx_count, row_bytes, message_bytes, metadata_bytes) =
-            decode_current_rewrite_hot_block_borrowed(&encoded).unwrap();
+        let row = compressed_test_input(encoded.clone(), 3, 0).row;
+        let (
+            header,
+            tx_count,
+            row_bytes,
+            message_bytes,
+            metadata_bytes,
+            consensus_block_id,
+            block_markers,
+        ) = decode_current_rewrite_hot_block_borrowed(&encoded, row).unwrap();
         assert_eq!(header.slot, block.header.slot);
         assert_eq!(header.parent_slot, block.header.parent_slot);
         assert_eq!(tx_count, block.tx_count);
@@ -13707,10 +14122,14 @@ mod tests {
         );
         assert_eq!(message_bytes, block.message_bytes);
         assert_eq!(metadata_bytes, block.metadata_bytes);
+        assert_eq!(consensus_block_id, block.consensus_block_id);
+        assert_eq!(block_markers, block.block_markers);
 
-        assert!(decode_current_rewrite_hot_block_borrowed(&encoded[..encoded.len() - 1]).is_err());
+        assert!(
+            decode_current_rewrite_hot_block_borrowed(&encoded[..encoded.len() - 1], row).is_err()
+        );
         encoded.push(0xff);
-        assert!(decode_current_rewrite_hot_block_borrowed(&encoded).is_err());
+        assert!(decode_current_rewrite_hot_block_borrowed(&encoded, row).is_err());
     }
 
     #[test]
@@ -13727,9 +14146,11 @@ mod tests {
             &[[2; 32], [3; 32], [1; 32]],
         );
         let old_to_new = [3, 1, 2, 0, 0];
+        let mut source_block = registry_wire_parity_block();
+        source_block.consensus_block_id = Some([0x71; 32]);
+        source_block.block_markers = vec![vec![0x11, 0x22, 0x33], vec![0x44, 0x55]];
         let source_encoded =
-            wincode::config::serialize(&registry_wire_parity_block(), wincode_leb128_config())
-                .unwrap();
+            wincode::config::serialize(&source_block, wincode_leb128_config()).unwrap();
         let mut expected_block: ArchiveV2HotBlockBlob = wincode::config::deserialize_exact(
             &source_encoded,
             bounded_wincode_config::<MAX_HOT_BLOCK_FRAME_BYTES_USIZE>(),
@@ -14117,13 +14538,24 @@ mod tests {
             ),
         ] {
             let input = compressed_test_input(encoded.clone(), 3, 0);
-            let current_error = decode_current_rewrite_hot_block_borrowed(&encoded).unwrap_err();
+            let current_error =
+                decode_current_rewrite_hot_block_borrowed(&encoded, input.row).unwrap_err();
+            if expected_schema == HotBlockOuterSchema::LegacyShredding {
+                assert!(matches!(
+                    &current_error,
+                    CurrentHotBlockDecodeError::PrefixIndexMismatch(_)
+                ));
+                assert!(current_error.to_string().contains("tx_count mismatch"));
+            }
             assert_eq!(
                 decode_legacy_hot_block_bytes(&encoded, input.row, &current_error.to_string())
                     .unwrap()
                     .outer_schema,
                 expected_schema
             );
+            let analysis =
+                analyze_source_exclusions(compressed_test_input(encoded.clone(), 3, 0)).unwrap();
+            assert_eq!(analysis.transactions, 3);
             assert_eq!(
                 decode_hot_block_bytes_with_schema(&encoded, input.row)
                     .unwrap()
@@ -14219,6 +14651,9 @@ mod tests {
             ],
             message_bytes: raw_messages.to_vec(),
             metadata_bytes: [encoded_metadata, raw_metadata.to_vec()].concat(),
+
+            consensus_block_id: None,
+            block_markers: Vec::new(),
         };
         let encoded = wincode::config::serialize(&block, wincode_leb128_config()).unwrap();
         let mut full: ArchiveV2HotBlockBlob = wincode::config::deserialize_exact(
@@ -14345,6 +14780,9 @@ mod tests {
             ],
             message_bytes: [message_bytes, raw_message.to_vec()].concat(),
             metadata_bytes: [metadata_bytes, raw_metadata.to_vec()].concat(),
+
+            consensus_block_id: None,
+            block_markers: Vec::new(),
         };
         let mut references = AccessReferenceSet::default();
         super::super::collect_access_blockhash_id(
@@ -14463,6 +14901,9 @@ mod tests {
             ],
             message_bytes: [first, second].concat(),
             metadata_bytes: Vec::new(),
+
+            consensus_block_id: None,
+            block_markers: Vec::new(),
         };
         let mut access = AccessReferenceSet::default();
 
@@ -14552,6 +14993,9 @@ mod tests {
             tx_rows: Vec::new(),
             message_bytes: Vec::new(),
             metadata_bytes: Vec::new(),
+
+            consensus_block_id: None,
+            block_markers: Vec::new(),
         };
         let mut classes = Vec::new();
         rewrite_block_pubkeys(&mut block, TEST_WIRE_PROFILE, |_key, class| {

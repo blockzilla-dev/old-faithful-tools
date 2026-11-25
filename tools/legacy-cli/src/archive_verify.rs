@@ -475,8 +475,42 @@ struct RepairDirectoryIdentity {
     mode: u32,
 }
 
-struct PohRepairLockGuard {
+#[derive(Debug)]
+struct PohMigrationLock {
     file: File,
+}
+
+impl std::ops::Deref for PohMigrationLock {
+    type Target = File;
+
+    fn deref(&self) -> &Self::Target {
+        &self.file
+    }
+}
+
+impl Drop for PohMigrationLock {
+    fn drop(&mut self) {
+        // A concurrent fork can inherit this open file description before CLOEXEC takes
+        // effect. Closing only our descriptor would then keep the lock held until the child
+        // closes its copy. End the logical owner's lock before closing its descriptor.
+        loop {
+            // SAFETY: this guard still owns the valid descriptor, and unlocking does not
+            // invalidate it. File closes it after this method returns.
+            if unsafe { libc::flock(self.file.as_raw_fd(), libc::LOCK_UN) } == 0 {
+                break;
+            }
+            let error = io::Error::last_os_error();
+            if error.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            warn!("failed to release PoH migration lock before closing it: {error}");
+            break;
+        }
+    }
+}
+
+struct PohRepairLockGuard {
+    file: PohMigrationLock,
     archive_dir: PathBuf,
     archive_identity: RepairDirectoryIdentity,
     lock_path: PathBuf,
@@ -626,7 +660,7 @@ impl Drop for PohMigrationTemp {
     }
 }
 
-fn acquire_poh_migration_lock(archive_dir: &Path) -> Result<File> {
+fn acquire_poh_migration_lock(archive_dir: &Path) -> Result<PohMigrationLock> {
     let archive_before = fs::symlink_metadata(archive_dir)
         .with_context(|| format!("inspect archive directory {}", archive_dir.display()))?;
     anyhow::ensure!(
@@ -671,6 +705,7 @@ fn acquire_poh_migration_lock(archive_dir: &Path) -> Result<File> {
     // final directory sync.
     let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
     if result == 0 {
+        let file = PohMigrationLock { file };
         let opened_after = file
             .metadata()
             .with_context(|| format!("restat PoH migration lock {}", path.display()))?;
@@ -5023,6 +5058,9 @@ mod tests {
             tx_rows: vec![],
             message_bytes: vec![],
             metadata_bytes: vec![],
+
+            consensus_block_id: None,
+            block_markers: Vec::new(),
         };
         let raw = wincode::config::serialize(&blob, blockzilla_primitives::wincode_leb128_config())
             .unwrap();
@@ -5238,6 +5276,9 @@ mod tests {
                 tx_rows: Vec::new(),
                 message_bytes: Vec::new(),
                 metadata_bytes: Vec::new(),
+
+                consensus_block_id: None,
+                block_markers: Vec::new(),
             },
             ArchiveV2HotBlockBlob {
                 header: ArchiveV2HotBlockHeader {
@@ -5262,6 +5303,9 @@ mod tests {
                 }],
                 message_bytes: Vec::new(),
                 metadata_bytes: Vec::new(),
+
+                consensus_block_id: None,
+                block_markers: Vec::new(),
             },
         ];
         let root = poh_migration_verify_fixture_root(label);
@@ -5557,6 +5601,9 @@ mod tests {
             tx_rows: vec![row(1, 2), row(0, 1)],
             message_bytes: Vec::new(),
             metadata_bytes: Vec::new(),
+
+            consensus_block_id: None,
+            block_markers: Vec::new(),
         };
         let uncompressed =
             wincode::config::serialize(&hot_block, blockzilla_primitives::wincode_leb128_config())
@@ -5914,6 +5961,9 @@ mod tests {
                 }],
                 message_bytes: Vec::new(),
                 metadata_bytes: Vec::new(),
+
+                consensus_block_id: None,
+                block_markers: Vec::new(),
             };
             let uncompressed = wincode::config::serialize(
                 &hot_block,
@@ -7511,6 +7561,9 @@ mod tests {
             ],
             message_bytes: vec![10, 11, 12, 13, 14],
             metadata_bytes: vec![20, 21, 22],
+
+            consensus_block_id: None,
+            block_markers: Vec::new(),
         };
         let uncompressed =
             wincode::config::serialize(&hot_block, blockzilla_primitives::wincode_leb128_config())
@@ -7530,6 +7583,9 @@ mod tests {
             tx_rows: Vec::new(),
             message_bytes: Vec::new(),
             metadata_bytes: Vec::new(),
+
+            consensus_block_id: None,
+            block_markers: Vec::new(),
         };
         let empty_uncompressed = wincode::config::serialize(
             &empty_hot_block,
@@ -7646,6 +7702,36 @@ mod tests {
     }
 
     #[test]
+    fn poh_migration_lock_drop_unlocks_duplicate_without_unlocking_successor() {
+        let root = poh_migration_verify_fixture_root("poh-migration-lock-duplicate");
+        let assert_contended = || {
+            let error = acquire_poh_migration_lock(&root).unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("another PoH signature-count migration already holds archive lock"),
+                "unexpected contention error: {error:#}"
+            );
+        };
+
+        let owner = acquire_poh_migration_lock(&root).unwrap();
+        // A duplicate pins the same open file description as an inherited pre-exec descriptor.
+        let inherited = owner.file.try_clone().unwrap();
+        assert_contended();
+        drop(owner);
+
+        let successor = acquire_poh_migration_lock(&root)
+            .expect("the owner's drop must unlock even while an inherited descriptor stays open");
+        assert_contended();
+        drop(inherited);
+        assert_contended();
+        drop(successor);
+
+        drop(acquire_poh_migration_lock(&root).unwrap());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
     fn poh_migration_lock_rejects_contender_without_touching_published_sidecar() {
         use blockzilla_archive_v2::{
             ArchiveV2HotBlockBlob, ArchiveV2HotBlockHeader, ArchiveV2HotBlockIndexRow,
@@ -7683,6 +7769,9 @@ mod tests {
             tx_rows: Vec::new(),
             message_bytes: Vec::new(),
             metadata_bytes: Vec::new(),
+
+            consensus_block_id: None,
+            block_markers: Vec::new(),
         };
         let uncompressed =
             wincode::config::serialize(&hot_block, blockzilla_primitives::wincode_leb128_config())

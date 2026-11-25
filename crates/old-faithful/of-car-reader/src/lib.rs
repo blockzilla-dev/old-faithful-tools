@@ -167,6 +167,7 @@
 //!
 //! - `archive` opens a complete local or HTTP CAR epoch through the common
 //!   ordered query interface when the `archive` feature is enabled.
+//! - [`blockmarker`] parses the original Alpenglow marker bytes.
 //! - [`node`] decodes Old Faithful CBOR nodes and peeks node kinds.
 //! - [`slot_ranges`] reads and writes worker slot range files.
 //! - [`genesis`] parses Solana genesis archives when the `genesis` feature is
@@ -197,8 +198,8 @@ pub mod slot_ranges;
 pub mod split_archive;
 
 pub use blockzilla_solana_wire::{
-    confirmed_block, confirmed_block_borrowed, metadata_decoder, short_vec, stored_transaction,
-    versioned_transaction,
+    blockmarker, confirmed_block, confirmed_block_borrowed, metadata_decoder, short_vec,
+    stored_transaction, versioned_transaction,
 };
 
 pub use car_block_group::{CarBlockGroup, TransactionFrame};

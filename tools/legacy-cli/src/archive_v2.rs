@@ -21,20 +21,21 @@ use blockzilla_archive_v2::{
     ArchiveV2BlockAccessBlob, ArchiveV2BlockAccessBlockhash, ArchiveV2BlockAccessIndexRow,
     ArchiveV2BlockAccessPubkey, ArchiveV2BlockAccessVoteHash,
     ArchiveV2ComputeBudgetInstructionData, ArchiveV2GetBlockIndexRow, ArchiveV2HotBlockBlob,
-    ArchiveV2HotBlockHeader, ArchiveV2HotBlockIndexRow, ArchiveV2HotInstruction,
-    ArchiveV2HotInstructionData, ArchiveV2HotLegacyMessage, ArchiveV2HotMessagePayload,
-    ArchiveV2HotMetaRecord, ArchiveV2HotRewards, ArchiveV2HotTxRow, ArchiveV2HotV0Message,
-    ArchiveV2HotV1Message, ArchiveV2SystemInstructionData, ArchiveV2VoteHashRef,
-    ArchiveV2VoteLockoutOffset, ArchiveV2VoteStateUpdate, ArchiveV2VoteTowerSync,
-    BLOCK_TIME_GAP_FILE, CAR_SLOT_META_FILE, CarSlotMetaReader, CarSlotMetaWriter,
-    WINCODE_ARCHIVE_V2_BLOCK_ACCESS_VERSION, WINCODE_ARCHIVE_V2_FLAG_ALL_PUBKEY_REF_COUNTS,
-    WINCODE_ARCHIVE_V2_FLAG_FIRST_SEEN_REGISTRY, WINCODE_ARCHIVE_V2_FLAG_LEB128,
-    WINCODE_ARCHIVE_V2_FLAG_NO_REGISTRY, WINCODE_ARCHIVE_V2_HOT_BLOCK_VERSION,
-    WINCODE_ARCHIVE_V2_VERSION, WincodeArchiveV2Block, WincodeArchiveV2BlockHeader,
-    WincodeArchiveV2Footer, WincodeArchiveV2Genesis, WincodeArchiveV2GenesisAccount,
-    WincodeArchiveV2GenesisBuiltin, WincodeArchiveV2GenesisEpochSchedule,
-    WincodeArchiveV2GenesisFeeParams, WincodeArchiveV2GenesisInflationParams,
-    WincodeArchiveV2GenesisPohParams, WincodeArchiveV2GenesisRentParams, WincodeArchiveV2Header,
+    ArchiveV2HotBlockHeader, ArchiveV2HotBlockIndexRow, ArchiveV2HotConsensus,
+    ArchiveV2HotInstruction, ArchiveV2HotInstructionData, ArchiveV2HotLegacyMessage,
+    ArchiveV2HotMessagePayload, ArchiveV2HotMetaRecord, ArchiveV2HotRewards, ArchiveV2HotTxRow,
+    ArchiveV2HotV0Message, ArchiveV2HotV1Message, ArchiveV2SystemInstructionData,
+    ArchiveV2VoteHashRef, ArchiveV2VoteLockoutOffset, ArchiveV2VoteStateUpdate,
+    ArchiveV2VoteTowerSync, BLOCK_TIME_GAP_FILE, CAR_SLOT_META_FILE, CarSlotMetaReader,
+    CarSlotMetaWriter, WINCODE_ARCHIVE_V2_BLOCK_ACCESS_VERSION,
+    WINCODE_ARCHIVE_V2_FLAG_ALL_PUBKEY_REF_COUNTS, WINCODE_ARCHIVE_V2_FLAG_FIRST_SEEN_REGISTRY,
+    WINCODE_ARCHIVE_V2_FLAG_LEB128, WINCODE_ARCHIVE_V2_FLAG_NO_REGISTRY,
+    WINCODE_ARCHIVE_V2_HOT_BLOCK_VERSION, WINCODE_ARCHIVE_V2_VERSION, WincodeArchiveV2Block,
+    WincodeArchiveV2BlockHeader, WincodeArchiveV2Footer, WincodeArchiveV2Genesis,
+    WincodeArchiveV2GenesisAccount, WincodeArchiveV2GenesisBuiltin,
+    WincodeArchiveV2GenesisEpochSchedule, WincodeArchiveV2GenesisFeeParams,
+    WincodeArchiveV2GenesisInflationParams, WincodeArchiveV2GenesisPohParams,
+    WincodeArchiveV2GenesisRentParams, WincodeArchiveV2Header,
     WincodeArchiveV2NoRegistryAddressTableLookup, WincodeArchiveV2NoRegistryBlock,
     WincodeArchiveV2NoRegistryBlockHeader, WincodeArchiveV2NoRegistryGenesis,
     WincodeArchiveV2NoRegistryGenesisAccount, WincodeArchiveV2NoRegistryGenesisBuiltin,
@@ -689,7 +690,7 @@ pub(crate) fn build(
             .checked_sub(1)
             .and_then(|index| blockhashes.get(index))
             .copied();
-        let (record, tx_count, mut sidecar) = build_block_record(
+        let (record, tx_count, mut sidecar, _consensus) = build_block_record(
             &mut pending,
             block,
             &key_index,
@@ -1005,7 +1006,7 @@ pub(crate) fn build_hot_blocks(
             .checked_sub(1)
             .and_then(|index| blockhashes.get(index))
             .copied();
-        let (mut record, tx_count, mut sidecar) = build_block_record(
+        let (mut record, tx_count, mut sidecar, consensus) = build_block_record(
             &mut pending,
             block,
             &key_index,
@@ -1040,7 +1041,7 @@ pub(crate) fn build_hot_blocks(
         } else {
             None
         };
-        let (hot_block, block_signature_count) = hot_block_from_archive_block(
+        let (mut hot_block, block_signature_count) = hot_block_from_archive_block(
             record,
             &known_program_ids,
             &slot_to_block_id,
@@ -1051,6 +1052,7 @@ pub(crate) fn build_hot_blocks(
             &mut timings,
         )
         .with_context(|| format!("slot {slot} hot block encode"))?;
+        apply_hot_consensus(&mut hot_block, consensus);
         patch_poh_entry_signature_counts(&mut sidecar.poh_entries, &hot_block.tx_rows)
             .with_context(|| format!("slot {slot} PoH entry signature counts"))?;
         block_bytes.clear();
@@ -1744,7 +1746,7 @@ pub(crate) fn build_hot_blocks_first_seen(
         timings.classify += classify_started.elapsed();
         let previous_blockhash =
             last_blockhash.or_else(|| previous_tail.last().map(|previous| previous.hash));
-        let (mut record, tx_count, mut sidecar) = build_block_record(
+        let (mut record, tx_count, mut sidecar, consensus) = build_block_record(
             &mut pending,
             block,
             &raw_key_index,
@@ -1806,7 +1808,7 @@ pub(crate) fn build_hot_blocks_first_seen(
         known_program_ids.refresh_from_first_seen(&registry);
         vote_hashes.ensure_block(block_id);
         let block_shredding = std::mem::take(&mut record.header.compact.shredding);
-        let (hot_block, block_signature_count) = hot_block_from_first_seen_archive_block(
+        let (mut hot_block, block_signature_count) = hot_block_from_first_seen_archive_block(
             record,
             &first_seen_signatures,
             &known_program_ids,
@@ -1817,6 +1819,7 @@ pub(crate) fn build_hot_blocks_first_seen(
             &mut timings,
         )
         .with_context(|| format!("slot {slot} first-seen hot block encode"))?;
+        apply_hot_consensus(&mut hot_block, consensus);
         first_seen_signatures.record_block_write();
         patch_poh_entry_signature_counts(&mut sidecar.poh_entries, &hot_block.tx_rows)
             .with_context(|| format!("slot {slot} PoH entry signature counts"))?;
@@ -2704,7 +2707,7 @@ fn build_pre_hot_spool(
         let archive_block_id = block_id.saturating_add(blockhash_id_offset);
         let previous_blockhash = (archive_block_id > 0).then_some(last_blockhash).flatten();
         rolling_blockhashes.prune_for_slot(block.slot)?;
-        let (record, tx_count, mut sidecar) = build_block_record(
+        let (record, tx_count, mut sidecar, _consensus) = build_block_record(
             &mut pending,
             block,
             &raw_key_index,
@@ -3074,7 +3077,7 @@ fn finalize_pre_hot_blocks(
                     None
                 };
                 vote_hashes.ensure_block(block_id);
-                let (hot_block, block_signature_count) = hot_block_from_archive_block(
+                let (mut hot_block, block_signature_count) = hot_block_from_archive_block(
                     pre_hot.block,
                     &known_program_ids,
                     &slot_to_block_id,
@@ -3085,6 +3088,10 @@ fn finalize_pre_hot_blocks(
                     &mut timings,
                 )
                 .with_context(|| format!("slot {slot} PreHot hot-block encode"))?;
+                apply_hot_consensus(
+                    &mut hot_block,
+                    ArchiveV2HotConsensus::from_slot_meta(&car_meta.meta),
+                );
                 let tx_count = hot_block.tx_count;
 
                 block_bytes.clear();
@@ -6360,6 +6367,9 @@ fn hot_block_from_archive_block_with_signatures(
             tx_rows,
             message_bytes,
             metadata_bytes,
+
+            consensus_block_id: None,
+            block_markers: Vec::new(),
         },
         block_signature_count,
     ))
@@ -6528,6 +6538,9 @@ fn hot_block_from_live_no_registry_block(
             tx_rows,
             message_bytes,
             metadata_bytes,
+
+            consensus_block_id: None,
+            block_markers: Vec::new(),
         },
         block_signature_count,
     ))
@@ -6724,6 +6737,9 @@ fn hot_block_from_live_no_registry_block_signature_counts(
             tx_rows,
             message_bytes,
             metadata_bytes,
+
+            consensus_block_id: None,
+            block_markers: Vec::new(),
         },
         block_signature_count,
     ))
@@ -17683,7 +17699,12 @@ fn build_block_record(
     zstd: &mut ZstdReusableDecoder,
     parallel_tx_decoder: Option<&mut HotTxDecodePool>,
     mut first_seen_signatures: Option<&mut FirstSeenBlockSignatures>,
-) -> Result<(WincodeArchiveV2Block, u32, ArchiveV2BlockSidecar)> {
+) -> Result<(
+    WincodeArchiveV2Block,
+    u32,
+    ArchiveV2BlockSidecar,
+    ArchiveV2HotConsensus,
+)> {
     pending.last_slot = block.slot;
     let entries = ordered_entries(pending, &block)?;
     let sidecar = block_sidecar_from_entries(
@@ -17849,7 +17870,13 @@ fn build_block_record(
         },
         ordered_txs.len() as u32,
         sidecar,
+        ArchiveV2HotConsensus::from_slot_meta(&block.meta),
     ))
+}
+
+fn apply_hot_consensus(block: &mut ArchiveV2HotBlockBlob, consensus: ArchiveV2HotConsensus) {
+    block.consensus_block_id = consensus.block_id;
+    block.block_markers = consensus.markers;
 }
 
 fn build_no_registry_block_record(
@@ -20435,6 +20462,24 @@ mod tests {
             assert_eq!(row.slot, 822 * crate::SLOTS_PER_EPOCH + 10);
             assert_eq!(row.meta.raw_cbor(), raw, "{}", output.display());
             assert!(reader.read_record().unwrap().is_none());
+        }
+        let source_meta = of_car_reader::node::SlotMeta::from_cbor(&raw).unwrap();
+        for output in [&first, &reused, &pre] {
+            let compressed = std::fs::read(output.join(ARCHIVE_V2_BLOCKS_FILE)).unwrap();
+            let plain = zstd::stream::decode_all(compressed.as_slice()).unwrap();
+            let block = deserialize_archive_v2_hot_block_blob(&plain).unwrap();
+            assert_eq!(
+                block.consensus_block_id,
+                source_meta.block_id,
+                "{}",
+                output.display()
+            );
+            assert_eq!(
+                block.block_markers,
+                source_meta.block_markers.clone().unwrap(),
+                "{}",
+                output.display(),
+            );
         }
         std::fs::remove_dir_all(root).unwrap();
     }

@@ -624,8 +624,8 @@ pub fn decode_entry_summary(data: &[u8]) -> crate::node::Result<(u64, &[u8], usi
 
 #[cfg(test)]
 mod tests {
-    use super::{DataFrame, Node, decode_node};
-    use minicbor::{Decode, Decoder, Encoder};
+    use super::{DataFrame, Node, SlotMeta, decode_node};
+    use minicbor::{Decode, Decoder, Encode, Encoder};
 
     #[test]
     fn dataframe_rejects_unsupported_next_array_shapes() {
@@ -686,5 +686,120 @@ mod tests {
 
         assert_eq!(frame.hash, Some(42));
         assert!(!frame.hash_was_negative);
+    }
+    fn header_marker(variant: u8, parent_slot: u64, parent_id: [u8; 32]) -> Vec<u8> {
+        let mut marker = Vec::new();
+        marker.extend_from_slice(&1u16.to_le_bytes());
+        marker.push(variant);
+        marker.extend_from_slice(&41u16.to_le_bytes());
+        marker.push(1);
+        marker.extend_from_slice(&parent_slot.to_le_bytes());
+        marker.extend_from_slice(&parent_id);
+        marker
+    }
+
+    #[test]
+    fn slot_meta_keeps_three_fields_and_round_trips() {
+        let mut e = Encoder::new(Vec::new());
+        e.array(3).unwrap();
+        e.u64(41).unwrap();
+        e.i64(1_700_000_000).unwrap();
+        e.u64(99).unwrap();
+        let bytes = e.into_writer();
+
+        let meta = SlotMeta::decode(&mut Decoder::new(&bytes), &mut ()).unwrap();
+        assert!(!meta.alpenglow());
+        assert_eq!(meta.parent_slot, Some(41));
+        assert_eq!(meta.blocktime, Some(1_700_000_000));
+        assert_eq!(meta.block_height, Some(99));
+        assert_eq!(meta.block_markers, None);
+        assert_eq!(meta.block_id, None);
+        assert_eq!(meta.parent_consensus_block_id(), None);
+
+        let mut encoded = Vec::new();
+        meta.encode(&mut Encoder::new(&mut encoded), &mut ())
+            .unwrap();
+        assert_eq!(encoded, bytes);
+    }
+
+    #[test]
+    fn slot_meta_keeps_a_short_parent_only_array() {
+        let mut e = Encoder::new(Vec::new());
+        e.array(1).unwrap();
+        e.u64(40).unwrap();
+        let bytes = e.into_writer();
+
+        let meta = SlotMeta::decode(&mut Decoder::new(&bytes), &mut ()).unwrap();
+        assert!(!meta.alpenglow());
+        assert_eq!(meta.meta_len, 1);
+        assert_eq!(meta.parent_slot, Some(40));
+        assert_eq!(meta.blocktime, None);
+        assert_eq!(meta.block_height, None);
+
+        let mut encoded = Vec::new();
+        meta.encode(&mut Encoder::new(&mut encoded), &mut ())
+            .unwrap();
+        assert_eq!(encoded, bytes);
+    }
+
+    #[test]
+    fn slot_meta_keeps_raw_markers_and_block_id() {
+        let parent_id = [0x11; 32];
+        let updated_parent = [0x22; 32];
+        let block_id = [0x33; 32];
+        let header = header_marker(1, 40, parent_id);
+        let update = header_marker(2, 39, updated_parent);
+        let footer = vec![1, 0, 0, 4, 0, 9, 9, 9];
+        let mut e = Encoder::new(Vec::new());
+        e.array(5).unwrap();
+        e.u64(41).unwrap();
+        e.null().unwrap();
+        e.u64(99).unwrap();
+        e.array(3).unwrap();
+        e.bytes(&header).unwrap();
+        e.bytes(&footer).unwrap();
+        e.bytes(&update).unwrap();
+        e.bytes(&block_id).unwrap();
+        let bytes = e.into_writer();
+
+        let meta = SlotMeta::decode(&mut Decoder::new(&bytes), &mut ()).unwrap();
+        assert!(meta.alpenglow());
+        assert_eq!(meta.blocktime, None);
+        assert_eq!(
+            meta.block_markers.as_ref().unwrap(),
+            &vec![header, footer, update.clone()]
+        );
+        assert_eq!(meta.block_id, Some(block_id));
+        assert_eq!(meta.parent_consensus_block_id(), Some(updated_parent));
+
+        let mut encoded = Vec::new();
+        meta.encode(&mut Encoder::new(&mut encoded), &mut ())
+            .unwrap();
+        let again = SlotMeta::decode(&mut Decoder::new(&encoded), &mut ()).unwrap();
+        assert_eq!(again, meta);
+    }
+
+    #[test]
+    fn slot_meta_rejects_a_short_block_id_and_keeps_null_tail() {
+        let mut e = Encoder::new(Vec::new());
+        e.array(5).unwrap();
+        e.u64(1).unwrap();
+        e.u64(2).unwrap();
+        e.u64(3).unwrap();
+        e.null().unwrap();
+        e.bytes(&[1, 2, 3]).unwrap();
+        assert!(SlotMeta::decode(&mut Decoder::new(&e.into_writer()), &mut ()).is_err());
+
+        let mut e = Encoder::new(Vec::new());
+        e.array(5).unwrap();
+        e.null().unwrap();
+        e.null().unwrap();
+        e.null().unwrap();
+        e.null().unwrap();
+        e.null().unwrap();
+        let meta = SlotMeta::decode(&mut Decoder::new(&e.into_writer()), &mut ()).unwrap();
+        assert!(meta.alpenglow());
+        assert_eq!(meta.block_markers, None);
+        assert_eq!(meta.block_id, None);
     }
 }

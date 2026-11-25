@@ -28,6 +28,7 @@ mod index_tokens;
 mod pre_hot;
 mod predecessor_tail_seed;
 mod scheduler;
+mod show_archive_v2_block_markers;
 mod split_compact;
 mod stream;
 mod token_events;
@@ -1170,9 +1171,10 @@ enum Commands {
         #[arg(long)]
         entry: Option<usize>,
     },
+
+    /// Print consensus block ids and Alpenglow block markers from a hot-block Archive V2.
+    ShowArchiveV2BlockMarkers(show_archive_v2_block_markers::ShowArchiveV2BlockMarkersArgs),
 }
-
-
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum BlockTimeGapSourceArg {
@@ -1999,6 +2001,7 @@ fn main() -> Result<()> {
         Commands::DumpCarPohEntry { input, slot, entry } => {
             car_debug::dump_car_poh_entry(&input, slot, entry)
         }
+        Commands::ShowArchiveV2BlockMarkers(args) => show_archive_v2_block_markers::run(args),
         Commands::VerifyArchiveV2Poh {
             archive_dir,
             threads,
@@ -2434,32 +2437,18 @@ fn json_f64(value: Option<f64>) -> String {
 #[cfg(test)]
 mod cli_tests {
     #[test]
-    fn archive_v3_convert_command_parses() {
+    fn archive_v3_command_is_not_available() {
         use clap::Parser;
-
-        let cli = super::Cli::try_parse_from([
-            "blockzilla",
-            "archive-v3",
-            "convert",
-            "v2-generation",
-            "v3-candidate",
-            "--workers",
-            "2",
-            "--pipeline-memory-limit-mib",
-            "128",
-        ])
-        .unwrap();
-        match cli.command {
-            super::Commands::ArchiveV3 {
-                command: super::ArchiveV3Commands::Convert(options),
-            } => {
-                assert_eq!(options.source, std::path::Path::new("v2-generation"));
-                assert_eq!(options.output, std::path::Path::new("v3-candidate"));
-                assert_eq!(options.workers, 2);
-                assert_eq!(options.pipeline_memory_limit_mib, 128);
-            }
-            _ => panic!("unexpected command"),
-        }
+        assert!(
+            super::Cli::try_parse_from([
+                "old-faithful",
+                "archive-v3",
+                "convert",
+                "v2-generation",
+                "v3-candidate",
+            ])
+            .is_err()
+        );
     }
 
     use super::*;
@@ -3422,6 +3411,30 @@ mod cli_tests {
             } => {
                 assert_eq!(repair_dir, Path::new("repair-view"));
                 assert_eq!(hot_output, Path::new("hot"));
+            }
+            _ => panic!("unexpected command"),
+        }
+    }
+
+    #[test]
+    fn show_archive_v2_block_markers_command_parses() {
+        let cli = Cli::try_parse_from([
+            "blockzilla",
+            "show-archive-v2-block-markers",
+            "epoch-out",
+            "--slot",
+            "460512004",
+            "--max-blocks",
+            "8",
+            "--check-parent-chain",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::ShowArchiveV2BlockMarkers(args) => {
+                assert_eq!(args.archive_dir, Path::new("epoch-out"));
+                assert_eq!(args.slot, Some(460512004));
+                assert_eq!(args.max_blocks, Some(8));
+                assert!(args.check_parent_chain);
             }
             _ => panic!("unexpected command"),
         }

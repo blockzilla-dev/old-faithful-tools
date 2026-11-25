@@ -7,7 +7,7 @@ provided by the sibling Blockzilla core.
 - `crates/old-faithful/of-car-reader`: CAR reader and its two fixed benchmark fixtures.
 - `crates/old-faithful/of-slot-ranges`: slot-range support.
 - [`get-block`](get-block/README.md): Worker API that reads Old Faithful CAR archives directly.
-- `tools/legacy-cli`: existing import/archive commands, with V3 commands removed.
+- Archive scheduling, repair and legacy migration commands live in private Hivezilla under `tools/archive-admin`.
 - `tools/sample-block-importer`: reproducible CAR-to-Compact benchmark fixture preparation.
 - `examples/read-car`: retained CAR reader examples.
 
@@ -29,3 +29,7 @@ git clone git@github.com:blockzilla-dev/blockzilla-indexers.git
 ```
 
 The repository is private. Access to `blockzilla-dev` is required.
+
+Host orchestration and R2 index publication scripts live in Hivezilla under
+`tools/old-faithful-indexes`. This repository keeps the CAR readers, index
+binaries, direct getBlock Worker and fixed sample importer.

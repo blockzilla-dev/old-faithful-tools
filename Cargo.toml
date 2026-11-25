@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/old-faithful/of-car-reader", "crates/old-faithful/of-slot-ranges", "get-block", "examples/read-car", "tools/legacy-cli"]
+members = ["crates/old-faithful/of-car-reader", "crates/old-faithful/of-slot-ranges", "get-block", "examples/read-car"]
 exclude = []
 
 [workspace.package]
@@ -8,7 +8,7 @@ version = "0.2.0"
 edition = "2024"
 rust-version = "1.98"
 license = "MIT"
-repository = "https://github.com/FernoLabs/blockzilla"
+repository = "https://github.com/blockzilla-dev/old-faithful-tools"
 
 [workspace.lints.rust]
 unexpected_cfgs = "deny"
@@ -20,9 +20,3 @@ incremental = false
 [profile.test]
 debug = 0
 incremental = false
-
-# Retain the original CLI test profile after the package rename.
-[profile.test.package.old-faithful-tools]
-opt-level = 1
-[profile.dev.package.old-faithful-tools]
-opt-level = 1

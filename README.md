@@ -17,12 +17,15 @@ published to a package registry.
 
 ## Checkout
 
-Keep this repository beside the Blockzilla core checkout. Until the cleanup is
-merged, select the core candidate branch explicitly:
+Keep this repository beside the Blockzilla core and indexers checkouts. The
+existing CAR examples use the shared application benchmark workloads in
+`blockzilla-indexers/examples/workloads`. Until the cleanup is merged, select
+the core candidate branch explicitly:
 
 ```sh
 git clone --branch codex/1.0-core git@github.com:blockzilla-dev/blockzilla.git blockzilla
 git clone git@github.com:blockzilla-dev/old-faithful-tools.git
+git clone git@github.com:blockzilla-dev/blockzilla-indexers.git
 ```
 
 The repository is private. Access to `blockzilla-dev` is required.

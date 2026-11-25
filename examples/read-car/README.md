@@ -18,7 +18,7 @@ selects an archive format at run time.
 
 USDC and Pump.fun exclude known failed transactions and report their count.
 Unknown execution status remains a coverage warning. The count example still
-includes all transactions. See the [shared workload rules](../workloads/README.md).
+includes all transactions. See the [shared workload rules](../../../blockzilla-indexers/examples/workloads/README.md).
 
 ## Start with a local archive
 
@@ -103,7 +103,7 @@ complete or incomplete state, indeterminate transaction count, and coverage
 SHA-256 to match. Compare the output files byte-for-byte outside the timed run.
 Use the same epoch, block universe, and target.
 The
-[`blockzilla-example-workloads` guide](../workloads/README.md)
+[`blockzilla-example-workloads` guide](../../../blockzilla-indexers/examples/workloads/README.md)
 defines this gate and the canonical records.
 
 CAR scans all requested blocks for each application job. It does not use the
@@ -126,7 +126,7 @@ cargo run --release --locked -p blockzilla-read-car --bin read-car-transactions 
 ```
 
 The
-[`blockzilla-example-workloads` guide](../workloads/README.md)
+[`blockzilla-example-workloads` guide](../../../blockzilla-indexers/examples/workloads/README.md)
 defines its common record and acceptance gate.
 
 ## Ordered read baseline

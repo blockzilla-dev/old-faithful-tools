@@ -1,6 +1,6 @@
 # old-faithful-get-block
 
-`old-faithful-get-block` is Edgezilla's experimental compatibility reader for
+`old-faithful-get-block` is the experimental compatibility reader for
 official Old Faithful CAR archives. It range-reads CAR data over HTTPS and uses
 precomputed indexes from R2; it does not require Archive V2 conversion.
 
@@ -72,7 +72,7 @@ uses.
 rustup target add wasm32-unknown-unknown
 cargo install worker-build --locked --version 0.8.5
 
-cd edgezilla/of-get-block
+cd get-block
 npm install
 npm run build
 npm run dev

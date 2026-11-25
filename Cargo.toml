@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/old-faithful/of-car-reader", "crates/old-faithful/of-slot-ranges", "edgezilla/of-get-block", "examples/read-car", "tools/legacy-cli"]
+members = ["crates/old-faithful/of-car-reader", "crates/old-faithful/of-slot-ranges", "get-block", "examples/read-car", "tools/legacy-cli"]
 exclude = []
 
 [workspace.package]

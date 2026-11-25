@@ -6,6 +6,7 @@ provided by the sibling Blockzilla core.
 
 - `crates/old-faithful/of-car-reader`: CAR reader and its two fixed benchmark fixtures.
 - `crates/old-faithful/of-slot-ranges`: slot-range support.
+- [`get-block`](get-block/README.md): Worker API that reads Old Faithful CAR archives directly.
 - `tools/legacy-cli`: existing import/archive commands, with V3 commands removed.
 - `tools/sample-block-importer`: reproducible CAR-to-Compact benchmark fixture preparation.
 - `examples/read-car`: retained CAR reader examples.

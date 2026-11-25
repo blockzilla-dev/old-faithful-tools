@@ -1,0 +1,22 @@
+[workspace]
+resolver = "2"
+members = ["crates/old-faithful/of-car-reader", "crates/old-faithful/of-slot-ranges", "edgezilla/of-get-block", "examples/read-car", "tools/legacy-cli"]
+exclude = []
+
+[workspace.package]
+version = "0.2.0"
+edition = "2024"
+rust-version = "1.98"
+license = "MIT"
+repository = "https://github.com/FernoLabs/blockzilla"
+
+[workspace.lints.rust]
+unexpected_cfgs = "deny"
+
+[profile.dev]
+debug = 0
+incremental = false
+
+[profile.test]
+debug = 0
+incremental = false

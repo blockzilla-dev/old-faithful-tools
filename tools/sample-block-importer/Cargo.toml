@@ -12,7 +12,7 @@ blockzilla-compact = { path = "../../../blockzilla/crates/compact-v2/blockzilla-
 blockzilla-primitives = { path = "../../../blockzilla/crates/blockzilla-primitives" }
 blockzilla-registry = { path = "../../../blockzilla/crates/compact-v2/blockzilla-registry" }
 blockzilla-sample-block-bench = { path = "../../../blockzilla/bench/sample-block" }
-of-car-reader = { path = "/Users/augustin/Developement/ferno/blockzilla-repositories/old-faithful-tools/crates/old-faithful/of-car-reader", default-features = false, features = ["zstd-native"] }
+of-car-reader = { path = "../../crates/old-faithful/of-car-reader", default-features = false, features = ["zstd-native"] }
 serde_json = "1.0.151"
 sha2 = "0.11.0"
 solana-pubkey = "4.2.1"

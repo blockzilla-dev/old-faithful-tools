@@ -12,5 +12,17 @@ provided by the sibling Blockzilla core.
 
 Run `cargo bench -p of-car-reader --bench big_block` for the CAR sample. The
 Compact V2 sample benchmark lives in Blockzilla. Full timing histories and
-machine records live in the private records repository. Source paths currently
-use the local extraction layout; no packages or remote repository were published.
+machine records live in the private records repository. Source dependencies use the sibling checkout layout below. No packages have been
+published to a package registry.
+
+## Checkout
+
+Keep this repository beside the Blockzilla core checkout. Until the cleanup is
+merged, select the core candidate branch explicitly:
+
+```sh
+git clone --branch codex/1.0-core git@github.com:blockzilla-dev/blockzilla.git blockzilla
+git clone git@github.com:blockzilla-dev/old-faithful-tools.git
+```
+
+The repository is private. Access to `blockzilla-dev` is required.
